@@ -1,6 +1,7 @@
 import json
-
+import os
 import requests
+import urllib3
 import yaml
 
 
@@ -88,7 +89,13 @@ def get_topology_info(topology_widget_children, topology_num):
 
 def get_vm_info(tpl_info=None, i=None, topology_properties=None):
     vm_name = 'compute_' + str(i) + '_' + tpl_info['name']
-    vm_properties = {'os_distro': 'Ubuntu', 'os_version': '18.04', 'user_name': 'vm_user'}
+    role = 'master'
+    assign_public_ip = 'yes'
+    if i > 0:
+        role = 'worker'
+        assign_public_ip = 'no'
+    vm_properties = {'os_distro': 'Ubuntu', 'os_version': '18.04', 'user_name': 'vm_user', 'role': role,
+                     'assign_public_ip': assign_public_ip}
     vm_properties.update(translate_vm_size(topology_properties['provider'], tpl_info['VM_size']))
     vm_interfaces = {'Standard': {'create': 'dumy.yaml'}}
 
@@ -99,7 +106,8 @@ def get_vm_info(tpl_info=None, i=None, topology_properties=None):
 
 def get_instance_properties(vm_name):
     props = {}
-    for prop_name in ['user_name', 'user_name', 'os_version', 'disk_size', 'mem_size', 'num_cores', 'os_distro']:
+    for prop_name in ['user_name', 'user_name', 'os_version', 'disk_size', 'mem_size', 'num_cores', 'os_distro',
+                      'role', 'assign_public_ip']:
         props[prop_name] = {'get_property': [vm_name, prop_name]}
     return props
 
@@ -268,3 +276,158 @@ def get_helm_app_info(chart_name, repo_name, repo_url, app_name, helm_applicatio
     if helm_dict_value:
         helm_interface['Helm']['install_chart']['inputs']['extra_variables']['values'] = helm_dict_value
     return helm_application_info
+
+
+def build_tosca(topologies_boxes=None, enable_monitoring_widget=None, app_name_widget=None,
+                helm_app_chart_name_widget=None,
+                helm_app_repo_name_widget=None, helm_app_values=None, helm_app_repo_url_widget=None, file_name=None):
+    index = 0
+    node_templates = {}
+    topology_names = []
+    k8s_interface = get_template(
+        'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/develop/templates/k8s_interface.yaml')
+    k8_requirements = []
+    workflows = {}
+
+    for topology in topologies_boxes:
+        index += 1
+
+        topology_info = get_topology_info(topology.children, index)
+        topology_names.append(topology_info['name'])
+
+        topology_properties = {'domain': translate_domain(topology_info['Cloud_Provider'],
+                                                          topology_info['Topology_Domain']),
+                               'provider': topology_info['Cloud_Provider']}
+        topology_requirements = []
+        instances = {}
+
+    for i in range(topology_info['Num._Of_VMs']):
+        vm_info = get_vm_info(tpl_info=topology_info, i=i, topology_properties=topology_properties)
+        node_templates.update(
+            build_node_template(node_name=vm_info['name'], node_type=vm_info['type'], properties=vm_info['properties'],
+                                interfaces=vm_info['interfaces']))
+        vm_req = {'vm': {'capability': 'tosca.capabilities.QC.VM', 'node': vm_info['name'],
+                         'relationship': 'tosca.relationships.DependsOn'}}
+        topology_requirements.append(vm_req)
+        instance_props = get_instance_properties(vm_info['name'])
+        instances[vm_info['name']] = instance_props
+        k8s_interface.update(build_k8s_inventory(interface=k8s_interface, count=i, info=vm_info))
+
+    azure_topology_interface = get_azure_topology_interface(instances, topology_info=topology_info)
+
+    azure_workflows = get_azure_workflows(topology_info=topology_info)
+    workflows.update(azure_workflows)
+
+    node_templates.update(
+        build_node_template(node_name=topology_info['name'], node_type='tosca.nodes.QC.VM.topology',
+                            properties=topology_properties, requirements=topology_requirements,
+                            interfaces=azure_topology_interface))
+    k8_requirement = {'host': {'capability': 'tosca.capabilities.QC.VM.topology', 'node': topology_info['name'],
+                               'relationship': 'tosca.relationships.HostedOn'}}
+    k8_requirements.append(k8_requirement)
+
+    k8s_workflows = get_k8s_workflows(topology_names, enable_monitoring_widget.value, app_name_widget.value,
+                                      topology_info=topology_info)
+    workflows.update(k8s_workflows)
+
+    vm_master_name = 'compute_' + str(0) + '_' + topology_info['name']
+    credential_properties = {'credential': {'get_attribute': [vm_master_name, 'user_key_pair']}}
+    ks8s_node = build_node_template(node_name='kubernetes', node_type='tosca.nodes.QC.docker.Orchestrator.Kubernetes',
+                                    properties=credential_properties, requirements=k8_requirements,
+                                    interfaces=k8s_interface)
+    node_templates.update(ks8s_node)
+
+    if enable_monitoring_widget.value:
+        helm_monitoring_info = get_helm_monitoring_info(vm_master_name=vm_master_name)
+        node_templates.update(build_node_template(node_name=helm_monitoring_info['name'],
+                                                  node_type='tosca.nodes.QC.Container.Application.Helm',
+                                                  properties=credential_properties,
+                                                  requirements=helm_monitoring_info['requirements'],
+                                                  interfaces=helm_monitoring_info['interfaces']))
+
+    helm_app_info = get_helm_app_info(helm_app_chart_name_widget.value, helm_app_repo_name_widget.value,
+                                      helm_app_repo_url_widget.value, app_name_widget.value, helm_app_values.value,
+                                      vm_master_name=vm_master_name)
+
+    node_templates.update(build_node_template(node_name=helm_app_info['name'],
+                                              node_type='tosca.nodes.QC.Container.Application.Helm',
+                                              properties=credential_properties,
+                                              requirements=helm_app_info['requirements'],
+                                              interfaces=helm_app_info['interfaces']))
+
+    topology_template = {'node_templates': node_templates, 'workflows': workflows}
+    tosca = {'tosca_definitions_version': 'tosca_simple_yaml_1_2'}
+    imports = [{'nodes': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/nodes.yaml',
+                'data': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/data.yml',
+                'capabilities': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/capabilities.yaml',
+                'policies': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/policies.yaml',
+                'interfaces': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/interfaces.yml'}]
+    tosca['imports'] = imports
+    repositories = {'docker_hub': 'https://hub.docker.com/'}
+    tosca['repositories'] = repositories
+    tosca['topology_template'] = topology_template
+
+    class NoAliasDumper(yaml.Dumper):
+        def ignore_aliases(self, data):
+            return True
+
+    if os.path.exists(file_name):
+        os.remove(file_name)
+
+    with open(file_name, 'w') as file:
+        yaml.dump(tosca, file, default_flow_style=False, Dumper=NoAliasDumper)
+
+
+def upload_tosca(base_url=None, username=None, password=None, file_name=None):
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    path = "/tosca_template"
+    payload = {}
+    fin = open(file_name, 'rb')
+    files = {'file': fin}
+
+    headers = {}
+
+    response = requests.request("POST", base_url + path, headers=headers, files=files, verify=False,
+                                auth=(username, password))
+    tosca_id = response.text
+
+    return tosca_id
+
+
+def provision(tosca_id=None, base_url=None, username=None, password=None):
+    path = "/provisioner/provision/" + tosca_id
+    payload = {}
+    headers = {'accept': 'text/plain'}
+
+    response = requests.request("GET", base_url + path, headers=headers, data=payload, verify=False,
+                                auth=(username, password))
+    if response.status_code != 200:
+        raise Exception('Something was wrong with the request: ' + str(response))
+    provisioned_tosca_id = response.text
+    return provisioned_tosca_id
+
+
+def deploy(tosca_id=None, base_url=None, username=None, password=None):
+    path = "/deployer/deploy/" + tosca_id
+    payload = {}
+    headers = {'accept': 'text/plain'}
+
+    response = requests.request("GET", base_url + path, headers=headers, data=payload, verify=False,
+                                auth=(username, password))
+    if response.status_code != 200:
+        raise Exception('Something was wrong with the request')
+    deployed_tosca_id = response.text
+    return deployed_tosca_id
+
+
+def delete(tosca_id=None, base_url=None, username=None, password=None):
+    path = "/tosca_template/" + tosca_id
+    payload = {}
+    headers = {'accept': 'text/plain'}
+
+    response = requests.request("DELETE", base_url + path, headers=headers, data=payload, verify=False,
+                                auth=(username, password))
+    if response.status_code != 200:
+        raise Exception('Something was wrong with the request')
+    deleted_tosca_id = response.text
+    return deleted_tosca_id

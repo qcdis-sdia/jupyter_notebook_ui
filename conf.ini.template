@@ -1,0 +1,4 @@
+[sdia]
+base_url = http://127.0.0.1:8080/orchestrator
+username = user
+password = pwd

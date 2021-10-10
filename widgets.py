@@ -1,19 +1,19 @@
 import ipywidgets as widgets
 
-sdia_conf_url_widget =  widgets.Text(
+sdia_conf_url_widget = widgets.Text(
     value='https://lifewatch.lab.uvalight.net:30003/orchestrator',
     placeholder='Enter SDIA API endpoint. e.g. https://lifewatch.lab.uvalight.net:30003/orchestrator',
     description='SDIA API URL:',
     disabled=False
 )
-sdia_conf_username_widget =  widgets.Text(
+sdia_conf_username_widget = widgets.Text(
     value='notebook_user',
     placeholder='Enter SDIA username',
     description='SDIA username:',
     disabled=False
 )
 
-sdia_conf_token_widget =  widgets.Password(
+sdia_conf_token_widget = widgets.Password(
     value='',
     placeholder='Enter your SDIA token',
     description='Password:',
@@ -23,14 +23,14 @@ sdia_conf_token_widget =  widgets.Password(
 sdia_conf_login_button = widgets.Button(
     description='Login',
     disabled=False,
-    button_style='', # 'success', 'info', 'warning', 'danger' or ''
+    button_style='',  # 'success', 'info', 'warning', 'danger' or ''
     tooltip='Run report',
-#     icon='check' # (FontAwesome names without the `fa-` prefix)
+    #     icon='check' # (FontAwesome names without the `fa-` prefix)
 )
 
 sdia_conf_output = widgets.Output()
-sdia_conf_box = widgets.VBox([sdia_conf_url_widget, sdia_conf_username_widget, sdia_conf_token_widget, sdia_conf_login_button])
-
+sdia_conf_box = widgets.VBox(
+    [sdia_conf_url_widget, sdia_conf_username_widget, sdia_conf_token_widget, sdia_conf_login_button])
 
 application_type_widget = widgets.Dropdown(
     options=['Helm'],
@@ -106,8 +106,7 @@ helm_app_box = widgets.VBox(
 
 app_conf_output = widgets.Output()
 
-
-num_of_topologies_widget= widgets.BoundedIntText(
+num_of_topologies_widget = widgets.BoundedIntText(
     value=1,
     min=1,
     max=4,
@@ -115,7 +114,6 @@ num_of_topologies_widget= widgets.BoundedIntText(
     description='Num. Of Topologies:',
     disabled=False
 )
-
 
 topologies_output = widgets.Output()
 number_of_topology_box = widgets.VBox([num_of_topologies_widget])
@@ -182,5 +180,3 @@ for line in app_prop:
     text += line + '\n'
 
 text += '\nInfrastructure\n'
-
-

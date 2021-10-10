@@ -2,107 +2,117 @@
 
 # Press Shift+F10 to execute it or replace it with your code.
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-import os
+import configparser
+import csv
+import time
+import traceback
+from datetime import datetime
 
 from methods import *
 from widgets import *
 
 topology_names = []
+
+
 # Press the green button in the gutter to run the script.
+
+
+def build_topologies_boxes(vm_num=None):
+    for i in range(0, num_of_topologies_widget.value):
+        cloud_provider_name_widget = widgets.Dropdown(options=['Azure'], value='Azure',
+                                                      description='Cloud Provider:',
+                                                      name='cloud_provider_name',
+                                                      disabled=False
+                                                      )
+
+        num_of_vms_widget = widgets.BoundedIntText(
+            value=vm_num,
+            min=1,
+            max=100,
+            step=1,
+            description='Num. Of VMs:',
+            disabled=False
+        )
+        vm_size_name_widget = widgets.Dropdown(
+            options=['small', 'medium', 'large', 'large_mem'],
+            value='small',
+            description='VM size:',
+            disabled=False
+        )
+        topology_domain_widget = widgets.Dropdown(
+            options=domain_names,
+            value=domain_names[7],
+            description='Topology Domain:',
+            disabled=False
+        )
+        topology_box = widgets.VBox(
+            [cloud_provider_name_widget, num_of_vms_widget, vm_size_name_widget, topology_domain_widget])
+        topologies_boxes.append(topology_box)
+    return topologies_boxes
+
+
 if __name__ == '__main__':
-    index = 0
-    node_templates = {}
 
-    k8s_interface = get_template(
-        'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/develop/templates/k8s_interface.yaml')
-    k8_requirements = []
-    workflows = {}
+    config = configparser.ConfigParser()
+    config.read('conf.ini')
+    sure_tosca_base_url = config['sdia']['base_url']
 
-    for topology in topologies_boxes:
-        index += 1
+    base_url = config['sdia']['base_url']
+    username = config['sdia']['username']
+    password = config['sdia']['password']
+    header = ['num_of_vm', 'build_tosca_time', 'upload_tosca_time', 'provision_time', 'deploy_time', 'delete_time',
+              'total_time']
+    data = []
+    now = datetime.now().strftime('%M:%S.%f')[:-4]
+    csv_name = str(now) + '_elapsed.csv'
+    with open(csv_name, 'w', encoding='UTF8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
 
-        topology_info = get_topology_info(topology.children, index)
-        topology_names.append(topology_info['name'])
+    for num_of_vm in [2]:
+        print('Building tosca. Num of VMs: ' + str(num_of_vm))
+        new_topologies_boxes = build_topologies_boxes(num_of_vm)
+        start = time.time()
+        total_start = time.time()
+        build_tosca(topologies_boxes=new_topologies_boxes, enable_monitoring_widget=enable_monitoring_widget,
+                    app_name_widget=app_name_widget,
+                    helm_app_chart_name_widget=helm_app_chart_name_widget,
+                    helm_app_repo_name_widget=helm_app_repo_name_widget, helm_app_values=helm_app_values,
+                    helm_app_repo_url_widget=helm_app_repo_url_widget, file_name=str(num_of_vm) + '_vms_tosca.yaml')
+        build_tosca_time = (time.time() - start)
 
-        topology_properties = {'domain': translate_domain(topology_info['Cloud_Provider'],
-                                                          topology_info['Topology_Domain']),
-                               'provider': topology_info['Cloud_Provider']}
-        topology_requirements = []
-        instances = {}
+        start = time.time()
+        print('Uploading tosca')
+        tosca_id = upload_tosca(base_url=base_url, username=username, password=password,
+                                file_name=str(num_of_vm) + '_vms_tosca.yaml')
+        upload_tosca_time = (time.time() - start)
+        print('tosca_id: ' + tosca_id)
 
-    for i in range(topology_info['Num._Of_VMs']):
-        vm_info = get_vm_info(tpl_info=topology_info, i=i, topology_properties=topology_properties)
-        node_templates.update(
-            build_node_template(node_name=vm_info['name'], node_type=vm_info['type'], properties=vm_info['properties'],
-                                interfaces=vm_info['interfaces']))
-        vm_req = {'vm': {'capability': 'tosca.capabilities.QC.VM', 'node': vm_info['name'],
-                         'relationship': 'tosca.relationships.DependsOn'}}
-        topology_requirements.append(vm_req)
-        instance_props = get_instance_properties(vm_info['name'])
-        instances[vm_info['name']] = instance_props
-        k8s_interface.update(build_k8s_inventory(interface=k8s_interface, count=i, info=vm_info))
+        start = time.time()
+        print('Provisioning')
+        prov_id = provision(username=username, base_url=base_url, tosca_id=tosca_id, password=password)
+        print('Provisioned: ' + prov_id)
+        provision_time = (time.time() - start)
 
-    azure_topology_interface = get_azure_topology_interface(instances, topology_info=topology_info)
+        start = time.time()
+        print('Deploying')
+        deploy_time = -1
+        try:
+            deploy_id = deploy(username=username, base_url=base_url, tosca_id=prov_id, password=password)
+            print('Deployed: ' + deploy_id)
+            deploy_time = (time.time() - start)
+        except Exception as e:
+            traceback.print_exc()
+            pass
 
-    azure_workflows = get_azure_workflows(topology_info=topology_info)
-    workflows.update(azure_workflows)
-
-    node_templates.update(
-        build_node_template(node_name=topology_info['name'], node_type='tosca.nodes.QC.VM.topology',
-                            properties=topology_properties, requirements=topology_requirements,
-                            interfaces=azure_topology_interface))
-    k8_requirement = {'host': {'capability': 'tosca.capabilities.QC.VM.topology', 'node': topology_info['name'],
-                               'relationship': 'tosca.relationships.HostedOn'}}
-    k8_requirements.append(k8_requirement)
-
-    k8s_workflows = get_k8s_workflows(topology_names, enable_monitoring_widget.value, app_name_widget.value,topology_info=topology_info)
-    workflows.update(k8s_workflows)
-
-    vm_master_name = 'compute_' + str(0) + '_' + topology_info['name']
-    credential_properties = {'credential': {'get_attribute': [vm_master_name, 'user_key_pair']}}
-    ks8s_node = build_node_template(node_name='kubernetes', node_type='tosca.nodes.QC.docker.Orchestrator.Kubernetes',
-                                    properties=credential_properties, requirements=k8_requirements,
-                                    interfaces=k8s_interface)
-    node_templates.update(ks8s_node)
-
-    if enable_monitoring_widget.value:
-        helm_monitoring_info = get_helm_monitoring_info(vm_master_name=vm_master_name)
-        node_templates.update(build_node_template(node_name=helm_monitoring_info['name'],
-                                                  node_type='tosca.nodes.QC.Container.Application.Helm',
-                                                  properties=credential_properties,
-                                                  requirements=helm_monitoring_info['requirements'],
-                                                  interfaces=helm_monitoring_info['interfaces']))
-
-    helm_app_info = get_helm_app_info(helm_app_chart_name_widget.value, helm_app_repo_name_widget.value,
-                                      helm_app_repo_url_widget.value, app_name_widget.value, helm_app_values.value,vm_master_name=vm_master_name)
-
-    node_templates.update(build_node_template(node_name=helm_app_info['name'],
-                                              node_type='tosca.nodes.QC.Container.Application.Helm',
-                                              properties=credential_properties,
-                                              requirements=helm_app_info['requirements'],
-                                              interfaces=helm_app_info['interfaces']))
-
-    topology_template = {'node_templates': node_templates, 'workflows': workflows}
-    tosca = {'tosca_definitions_version': 'tosca_simple_yaml_1_2'}
-    imports = [{'nodes': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/nodes.yaml',
-                'data': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/data.yml',
-                'capabilities': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/capabilities.yaml',
-                'policies': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/policies.yaml',
-                'interfaces': 'https://raw.githubusercontent.com/qcdis-sdia/sdia-tosca/master/types/interfaces.yml'}]
-    tosca['imports'] = imports
-    repositories = {'docker_hub': 'https://hub.docker.com/'}
-    tosca['repositories'] = repositories
-    tosca['topology_template'] = topology_template
-
-
-    class NoAliasDumper(yaml.Dumper):
-        def ignore_aliases(self, data):
-            return True
-
-
-    filePath = 'generated_tosca.yaml'
-    if os.path.exists(filePath):
-        os.remove(filePath)
-
-    with open(filePath, 'w') as file:
-        yaml.dump(tosca, file, default_flow_style=False, Dumper=NoAliasDumper)
+        # start = time.time()
+        # print('Deleting')
+        # delete(username=username, base_url=base_url, tosca_id=prov_id, password=password)
+        # delete_time = (time.time() - start)
+        #
+        # total_time = (time.time() - total_start)
+        # line = [num_of_vm, build_tosca_time, upload_tosca_time, provision_time, deploy_time, delete_time, total_time]
+        #
+        # with open(csv_name, 'a', encoding='UTF8') as f:
+        #     writer = csv.writer(f)
+        #     writer.writerow(line)
